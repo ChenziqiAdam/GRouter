@@ -68,6 +68,12 @@ def parse_args():
                         help="Weight of the anchor loss during training.")
     parser.add_argument('--sparse_weight', type=float, default=1.0,
                         help="Weight of the sparse regularization loss during training.")
+    parser.add_argument('--from_graph_dir', type=str, default=None,
+                        help="Directory to load the graph.")
+    parser.add_argument('--to_graph_dir', type=str, default=None,
+                        help="Directory to save the graph.")
+    parser.add_argument('--experiment_name', type=str, default=None,
+                        help="Name of the experiment.")
     args = parser.parse_args()
     result_path = GDesigner_ROOT / "result"
     os.makedirs(result_path, exist_ok=True)
@@ -83,23 +89,33 @@ async def main():
     dataset = gsm_data_process(dataset)
     current_time = Time.instance().value or time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     Time.instance().value = current_time
-    result_dir = Path(f"{GDesigner_ROOT}/result/gsm8k")
-    result_dir.mkdir(parents=True, exist_ok=True)
-    result_file = result_dir / f"{args.domain}_{args.llm_name}_{current_time}.json"
+    if args.experiment_name:
+        experiment_dir = Path(f"{GDesigner_ROOT}/result/{args.experiment_name}")
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        result_dir = experiment_dir / f"{args.domain}_{args.llm_name}_{current_time}"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_file = result_dir / f"result.json"
+    else:
+        result_dir = Path(f"{GDesigner_ROOT}/result/gsm8k")
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_file = result_dir / f"{args.domain}_{args.llm_name}_{current_time}.json"
     
     agent_names = [name for name,num in zip(args.agent_names,args.agent_nums) for _ in range(num)]
     decision_method = args.decision_method
     kwargs = get_kwargs(args.mode,len(agent_names))
-    graph = Graph(domain="gsm8k",
-                  llm_name=args.llm_name,
-                  agent_names=agent_names,
-                  decision_method=decision_method,
-                  optimized_spatial=args.optimized_spatial,
-                  optimized_temporal=args.optimized_temporal,
-                  gumbel_tau=args.gumbel_tau,
-                  refine_rank=args.refine_rank,
-                  refine_zeta=args.refine_zeta,
-                  **kwargs)
+    if args.from_graph_dir:
+        graph = Graph.load_graph(args.from_graph_dir)
+    else:
+        graph = Graph(domain="gsm8k",
+                    llm_name=args.llm_name,
+                    agent_names=agent_names,
+                    decision_method=decision_method,
+                    optimized_spatial=args.optimized_spatial,
+                    optimized_temporal=args.optimized_temporal,
+                    gumbel_tau=args.gumbel_tau,
+                    refine_rank=args.refine_rank,
+                    refine_zeta=args.refine_zeta,
+                    **kwargs)
     graph.gcn.train()
     graph.mlp.train()
     graph.encoder_mu.train()
@@ -165,7 +181,7 @@ async def main():
         anchor_losses: List[torch.Tensor] = []
         sparse_losses: List[torch.Tensor] = []
         
-        for realized_graph, task, answer, log_prob, true_answer in zip(realized_graphs, current_batch, raw_answers, log_probs, answers):
+        for i, realized_graph, task, answer, log_prob, true_answer in enumerate(zip(realized_graphs, current_batch, raw_answers, log_probs, answers)):
             predict_answer = gsm_get_predict(answer[0])
             is_solved = float(predict_answer)==float(true_answer)
             total_solved = total_solved + is_solved
@@ -192,8 +208,11 @@ async def main():
                 "anchor_loss": anchor_losses[-1].item(),
                 "sparse_loss": sparse_losses[-1].item(),
                 "cost": Cost.instance().value,
+                "prompt_tokens": PromptTokens.instance().value,
+                "completion_tokens": CompletionTokens.instance().value,
             }
             data.append(updated_item)
+            realized_graph.save_result(result_dir, i)
         with open(result_file, 'w',encoding='utf-8') as file:
             json.dump(data, file, indent=4)
         
@@ -238,7 +257,8 @@ async def main():
         print(f"Cost {Cost.instance().value}")
         print(f"PromptTokens {PromptTokens.instance().value}")
         print(f"CompletionTokens {CompletionTokens.instance().value}")
-
+    if args.to_graph_dir:
+        graph.save_graph(args.to_graph_dir)
 
 def get_kwargs(mode:Union[Literal['DirectAnswer'],Literal['FullConnected'],Literal['Random'],Literal['Chain'],Literal['Debate'],Literal['Layered'],Literal['Star']]
                ,N:int):

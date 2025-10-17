@@ -199,6 +199,7 @@ class Graph(ABC):
         init_temporal_logit = torch.log(torch.tensor(initial_temporal_probability / (1 - initial_temporal_probability))) if optimized_temporal else 10.0
         self.temporal_logits = torch.nn.Parameter(torch.ones(len(self.potential_temporal_edges), requires_grad=optimized_temporal) * init_temporal_logit,
                                                  requires_grad=optimized_temporal) # trainable edge logits
+        self.group_conversation_history: List[Dict[str,str]] = []
     
     def construct_adj_matrix(self):
         role_connect:List[Tuple[str,str]] = self.prompt_set.get_role_connection()
@@ -331,6 +332,90 @@ class Graph(ABC):
     @property
     def num_nodes(self):
         return len(self.nodes)
+
+    def reset_group_conversation_history(self, input):
+        self.group_conversation_history = [input]
+
+    def save_graph_connections(self, task_dir: str):
+        def adj_matrix_to_human_json(adj_matrix):
+            roles = [node.role for node in self.nodes.values()]
+            df = pd.DataFrame(adj_matrix, index=roles, columns=roles)
+            return df.to_markdown()
+        spatial_adj_matrix_str = adj_matrix_to_human_json(self.spatial_adj_matrix)
+        temporal_adj_matrix_str = adj_matrix_to_human_json(self.temporal_adj_matrix)
+        with open(os.path.join(task_dir, "spatial_adj_matrix.md"), "w") as f:
+            f.write(spatial_adj_matrix_str)
+        with open(os.path.join(task_dir, "temporal_adj_matrix.md"), "w") as f:
+            f.write(temporal_adj_matrix_str)
+
+    def save_result(self, result_dir: str, task_id: str):
+        group_conversation_history = self.group_conversation_history
+        if not os.path.exists(result_dir):
+            os.makedirs(result_dir)
+        task_dir = os.path.join(result_dir, task_id)
+        if not os.path.exists(task_dir):
+            os.makedirs(task_dir)
+        self.save_graph_connections(task_dir)
+        with open(os.path.join(task_dir, "group_conversation_history.json"), "w") as f:
+            json.dump(group_conversation_history, f, indent=4)
+    
+    def save_graph(self, graph_dir: str):
+        self.init_nodes()
+        self.init_fixed_edge()
+        self.init_potential_edges()
+        config_dir = os.path.join(graph_dir, "config.json")
+        gcn_dir = os.path.join(graph_dir, "gcn.pt")
+        mlp_dir = os.path.join(graph_dir, "mlp.pt")
+        encoder_mu_dir = os.path.join(graph_dir, "encoder_mu.pt")
+        encoder_logvar_dir = os.path.join(graph_dir, "encoder_logvar.pt")
+        ps_linear_dir = os.path.join(graph_dir, "ps_linear.pt")
+        refine_dir = os.path.join(graph_dir, "refine.pt")
+        config_dict = {
+            "domain": self.domain,
+            "llm_name": self.llm_name,
+            "agent_names": self.agent_names,
+            "decision_method": self.decision_method,
+            "optimized_spatial": self.optimized_spatial,
+            "initial_spatial_probability": self.initial_spatial_probability,
+            "fixed_spatial_masks": self.fixed_spatial_masks,
+            "optimized_temporal": self.optimized_temporal,
+            "initial_temporal_probability": self.initial_temporal_probability,
+            "fixed_temporal_masks": self.fixed_temporal_masks,
+            "node_kwargs": self.node_kwargs,
+            "gumbel_tau": self.gumbel_tau,
+            "refine_rank": self.refine_rank,
+            "refine_zeta": self.refine_zeta,
+        }
+        with open(config_dir, "w") as f:
+            json.dump(config_dict, f, indent=4)
+        torch.save(self.gcn.state_dict(), gcn_dir)
+        torch.save(self.mlp.state_dict(), mlp_dir)
+        torch.save(self.encoder_mu.state_dict(), encoder_mu_dir)
+        torch.save(self.encoder_logvar.state_dict(), encoder_logvar_dir)
+        torch.save(self.ps_linear.state_dict(), ps_linear_dir)
+        torch.save(self.refine.state_dict(), refine_dir)
+    
+    @classmethod
+    def load_graph(cls, graph_dir: str, **kwargs):
+        config_dir = os.path.join(graph_dir, "config.json")
+        gcn_dir = os.path.join(graph_dir, "gcn.pt")
+        mlp_dir = os.path.join(graph_dir, "mlp.pt")
+        encoder_mu_dir = os.path.join(graph_dir, "encoder_mu.pt")
+        encoder_logvar_dir = os.path.join(graph_dir, "encoder_logvar.pt")
+        ps_linear_dir = os.path.join(graph_dir, "ps_linear.pt")
+        refine_dir = os.path.join(graph_dir, "refine.pt")
+        with open(config_dir, "r") as f:
+            config = json.load(f)
+        if kwargs is not None:
+            config.update(kwargs)
+        graph = cls(**config)
+        graph.gcn.load_state_dict(torch.load(gcn_dir))
+        graph.mlp.load_state_dict(torch.load(mlp_dir))
+        graph.encoder_mu.load_state_dict(torch.load(encoder_mu_dir))
+        graph.encoder_logvar.load_state_dict(torch.load(encoder_logvar_dir))
+        graph.ps_linear.load_state_dict(torch.load(ps_linear_dir))
+        graph.refine.load_state_dict(torch.load(refine_dir))
+        return graph
 
     def find_node(self, id: str):
         if id in self.nodes.keys():
@@ -494,6 +579,7 @@ class Graph(ABC):
                   max_tries: int = 3, 
                   max_time: int = 600,) -> List[Any]:
         # inputs:{'task':"xxx"}
+        self.reset_group_conversation_history()
         log_probs = 0
         self.prepare_probabilities(input['task'])
 
@@ -509,11 +595,20 @@ class Graph(ABC):
                 tries = 0
                 while tries < max_tries:
                     try:
-                        await asyncio.wait_for(self.nodes[current_node_id].async_execute(input),timeout=max_time) # output is saved in the node.outputs
+                        outputs, system_prompt, user_prompt = await asyncio.wait_for(self.nodes[current_node_id].async_execute(input),timeout=max_time) # output is saved in the node.outputs
                         break
                     except Exception as e:
                         print(f"Error during execution of node {current_node_id}: {str(e)}")
                     tries += 1
+                current_node = self.nodes[current_node_id]
+                self.group_conversation_history.append(
+                        {
+                            "role": current_node.role, 
+                            "system": system_prompt,
+                            "user": user_prompt, 
+                            "outputs": outputs,
+                        }
+                    )
                 for successor in self.nodes[current_node_id].spatial_successors:
                     if successor.id not in self.nodes.keys():
                         continue
