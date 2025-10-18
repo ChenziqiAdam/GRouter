@@ -1,4 +1,5 @@
 import torch
+from GDesigner.graph.graph import Graph
 
 def get_optimizer(graph: Graph, **kwargs):
     trainable_params = []

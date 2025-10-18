@@ -90,21 +90,36 @@ async def main():
     dataset = gsm_data_process(dataset)
     current_time = Time.instance().value or time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     Time.instance().value = current_time
+    executed_batch = None
     if args.experiment_name:
         experiment_dir = Path(f"{GDesigner_ROOT}/result/{args.experiment_name}")
         experiment_dir.mkdir(parents=True, exist_ok=True)
-        result_dir = experiment_dir / f"{args.domain}_{args.llm_name}_{current_time}"
+        result_dir = experiment_dir / f"{args.domain}_{args.llm_name}"
         result_dir.mkdir(parents=True, exist_ok=True)
         result_file = result_dir / f"result.json"
+        if result_file.exists():
+            data = load_result(result_file)
+            executed_batch = len(data)/args.batch_size
+            last_result = data[-1]
+            total_solved, total_executed = last_result["Total solved"], last_result["Total executed"]
+        else:
+            total_solved, total_executed = (0, 0)
     else:
         result_dir = Path(f"{GDesigner_ROOT}/result/gsm8k")
         result_dir.mkdir(parents=True, exist_ok=True)
         result_file = result_dir / f"{args.domain}_{args.llm_name}_{current_time}.json"
+        if result_file.exists():
+            data = load_result(result_file)
+            executed_batch = len(data)/args.batch_size
+            last_result = data[-1]
+            total_solved, total_executed = last_result["Total Solved"], last_result["Total executed"]
+        else:
+            total_solved, total_executed = (0, 0)
     
     agent_names = [name for name,num in zip(args.agent_names,args.agent_nums) for _ in range(num)]
     decision_method = args.decision_method
     kwargs = get_kwargs(args.mode,len(agent_names))
-    if args.from_graph_dir:
+    if args.from_graph_dir and executed_batch:
         graph = Graph.load_graph(
             graph_dir = args.from_graph_dir,
             domain="gsm8k",
@@ -138,9 +153,18 @@ async def main():
     sparse_weight = args.sparse_weight
     
     num_batches = int(len(dataset)/args.batch_size)
-    total_solved, total_executed = (0, 0)
     
     for i_batch in range(num_batches):
+        if executed_batch:
+            if i_batch < executed_batch:
+                if i_batch+1 == args.num_iterations:
+                    args.optimized_spatial = False
+                    args.optimized_temporal = False
+                    total_solved = 0
+                    total_executed = 0
+                    graph.eval()
+                    print("Start Eval")
+                continue
         print(f"Batch {i_batch}",80*'-')
         start_ts = time.time()
         answer_log_probs = []
@@ -175,7 +199,7 @@ async def main():
         anchor_losses: List[torch.Tensor] = []
         sparse_losses: List[torch.Tensor] = []
         
-        for i, (realized_graph, task, answer, log_prob, true_answer) in enumerate(zip(realized_graphs, current_batch, raw_answers, log_probs, answers)):
+        for realized_graph, task, answer, log_prob, true_answer in zip(realized_graphs, current_batch, raw_answers, log_probs, answers):
             predict_answer = gsm_get_predict(answer[0])
             is_solved = float(predict_answer)==float(true_answer)
             total_solved = total_solved + is_solved
@@ -206,7 +230,7 @@ async def main():
                 "completion_tokens": CompletionTokens.instance().value,
             }
             data.append(updated_item)
-            realized_graph.save_result(result_dir, str(i))
+            realized_graph.save_result(result_dir, str(total_executed))
         with open(result_file, 'w',encoding='utf-8') as file:
             json.dump(data, file, indent=4)
         
@@ -236,6 +260,8 @@ async def main():
         print("L_GDesigner:", L_GDesigner.item())
         
         if i_batch+1 == args.num_iterations:
+            if args.to_graph_dir:
+                graph.save_graph(args.to_graph_dir)
             args.optimized_spatial = False
             args.optimized_temporal = False
             total_solved = 0
@@ -246,9 +272,6 @@ async def main():
         print(f"Cost {Cost.instance().value}")
         print(f"PromptTokens {PromptTokens.instance().value}")
         print(f"CompletionTokens {CompletionTokens.instance().value}")
-        break
-    if args.to_graph_dir:
-        graph.save_graph(args.to_graph_dir)
 
 def get_kwargs(mode:Union[Literal['DirectAnswer'],Literal['FullConnected'],Literal['Random'],Literal['Chain'],Literal['Debate'],Literal['Layered'],Literal['Star']]
                ,N:int):
