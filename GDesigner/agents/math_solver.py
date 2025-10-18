@@ -60,4 +60,8 @@ class MathSolver(Node):
         print(f"#################system_prompt:{system_prompt}")
         print(f"#################user_prompt:{user_prompt}")
         print(f"#################response:{response}")
-        return response, system_prompt, user_prompt
+        self.inputs.append({
+            "system": system_prompt,
+            "user": user_prompt,
+        })
+        return response

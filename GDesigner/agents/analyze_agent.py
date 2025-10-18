@@ -63,4 +63,8 @@ class AnalyzeAgent(Node):
         print(f"################system prompt:{system_prompt}")
         print(f"################user prompt:{user_prompt}")
         print(f"################response:{response}")
+        self.inputs.append({
+            "system": system_prompt,
+            "user": user_prompt,
+        })
         return response

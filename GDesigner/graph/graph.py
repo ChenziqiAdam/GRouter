@@ -6,7 +6,9 @@ import torch
 import torch.nn as nn
 from torch.distributions import Bernoulli
 import asyncio
-
+import os
+import json
+import pandas as pd
 from GDesigner.graph.node import Node, TaskNode
 from GDesigner.agents.agent_registry import AgentRegistry
 from GDesigner.prompt.prompt_set_registry import PromptSetRegistry
@@ -121,6 +123,9 @@ class Graph(ABC):
         self.agent_names:List[str] = agent_names
         self.optimized_spatial = optimized_spatial
         self.optimized_temporal = optimized_temporal
+        self.decision_method = decision_method
+        self.refine_rank = refine_rank
+        self.refine_zeta = refine_zeta
         self.decision_node:Node = AgentRegistry.get(decision_method, **{"domain":self.domain,"llm_name":self.llm_name})
         self.nodes:Dict[str,Node] = {}
         # self.agent_node_ids: List[str] = []
@@ -360,10 +365,9 @@ class Graph(ABC):
             json.dump(group_conversation_history, f, indent=4)
     
     def save_graph(self, graph_dir: str):
-        self.init_nodes()
-        self.init_fixed_edge()
-        self.init_potential_edges()
-        config_dir = os.path.join(graph_dir, "config.json")
+        if not os.path.exists(graph_dir):
+            os.makedirs(graph_dir)
+        config_path = os.path.join(graph_dir, "config.json")
         gcn_dir = os.path.join(graph_dir, "gcn.pt")
         mlp_dir = os.path.join(graph_dir, "mlp.pt")
         encoder_mu_dir = os.path.join(graph_dir, "encoder_mu.pt")
@@ -375,18 +379,11 @@ class Graph(ABC):
             "llm_name": self.llm_name,
             "agent_names": self.agent_names,
             "decision_method": self.decision_method,
-            "optimized_spatial": self.optimized_spatial,
-            "initial_spatial_probability": self.initial_spatial_probability,
-            "fixed_spatial_masks": self.fixed_spatial_masks,
-            "optimized_temporal": self.optimized_temporal,
-            "initial_temporal_probability": self.initial_temporal_probability,
-            "fixed_temporal_masks": self.fixed_temporal_masks,
-            "node_kwargs": self.node_kwargs,
             "gumbel_tau": self.gumbel_tau,
             "refine_rank": self.refine_rank,
             "refine_zeta": self.refine_zeta,
         }
-        with open(config_dir, "w") as f:
+        with open(config_path, "w") as f:
             json.dump(config_dict, f, indent=4)
         torch.save(self.gcn.state_dict(), gcn_dir)
         torch.save(self.mlp.state_dict(), mlp_dir)
@@ -397,14 +394,14 @@ class Graph(ABC):
     
     @classmethod
     def load_graph(cls, graph_dir: str, **kwargs):
-        config_dir = os.path.join(graph_dir, "config.json")
+        config_path = os.path.join(graph_dir, "config.json")
         gcn_dir = os.path.join(graph_dir, "gcn.pt")
         mlp_dir = os.path.join(graph_dir, "mlp.pt")
         encoder_mu_dir = os.path.join(graph_dir, "encoder_mu.pt")
         encoder_logvar_dir = os.path.join(graph_dir, "encoder_logvar.pt")
         ps_linear_dir = os.path.join(graph_dir, "ps_linear.pt")
         refine_dir = os.path.join(graph_dir, "refine.pt")
-        with open(config_dir, "r") as f:
+        with open(config_path, "r") as f:
             config = json.load(f)
         if kwargs is not None:
             config.update(kwargs)
@@ -579,7 +576,7 @@ class Graph(ABC):
                   max_tries: int = 3, 
                   max_time: int = 600,) -> List[Any]:
         # inputs:{'task':"xxx"}
-        self.reset_group_conversation_history()
+        self.reset_group_conversation_history(input)
         log_probs = 0
         self.prepare_probabilities(input['task'])
 
@@ -595,7 +592,7 @@ class Graph(ABC):
                 tries = 0
                 while tries < max_tries:
                     try:
-                        outputs, system_prompt, user_prompt = await asyncio.wait_for(self.nodes[current_node_id].async_execute(input),timeout=max_time) # output is saved in the node.outputs
+                        await asyncio.wait_for(self.nodes[current_node_id].async_execute(input),timeout=max_time) # output is saved in the node.outputs
                         break
                     except Exception as e:
                         print(f"Error during execution of node {current_node_id}: {str(e)}")
@@ -604,9 +601,9 @@ class Graph(ABC):
                 self.group_conversation_history.append(
                         {
                             "role": current_node.role, 
-                            "system": system_prompt,
-                            "user": user_prompt, 
-                            "outputs": outputs,
+                            "system": current_node.inputs[-1]["system"],
+                            "user": current_node.inputs[-1]["user"], 
+                            "outputs": current_node.outputs[-1],
                         }
                     )
                 for successor in self.nodes[current_node_id].spatial_successors:

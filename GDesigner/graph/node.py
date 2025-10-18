@@ -161,12 +161,12 @@ class Node(ABC):
         spatial_info:Dict[str,Any] = self.get_spatial_info()
         temporal_info:Dict[str,Any] = self.get_temporal_info()
         tasks = [asyncio.create_task(self._async_execute(input, spatial_info, temporal_info, **kwargs))]
-        results, system_prompt, user_prompt = await asyncio.gather(*tasks, return_exceptions=False)
+        results = await asyncio.gather(*tasks, return_exceptions=False)
         for result in results:
             if not isinstance(result, list):
                 result = [result]
             self.outputs.extend(result)
-        return self.outputs, system_prompt, user_prompt
+        return self.outputs
                
     @abstractmethod
     def _execute(self, input: List[Any], spatial_info: Dict[str, Any], temporal_info: Dict[str, Any], **kwargs):

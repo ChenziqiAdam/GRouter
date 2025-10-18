@@ -104,7 +104,19 @@ async def main():
     decision_method = args.decision_method
     kwargs = get_kwargs(args.mode,len(agent_names))
     if args.from_graph_dir:
-        graph = Graph.load_graph(args.from_graph_dir)
+        graph = Graph.load_graph(
+            graph_dir = args.from_graph_dir,
+            domain="gsm8k",
+            llm_name=args.llm_name,
+            agent_names=agent_names,
+            decision_method=decision_method,
+            optimized_spatial=args.optimized_spatial,
+            optimized_temporal=args.optimized_temporal,
+            gumbel_tau=args.gumbel_tau,
+            refine_rank=args.refine_rank,
+            refine_zeta=args.refine_zeta,
+            **kwargs
+        )
     else:
         graph = Graph(domain="gsm8k",
                     llm_name=args.llm_name,
@@ -181,7 +193,7 @@ async def main():
         anchor_losses: List[torch.Tensor] = []
         sparse_losses: List[torch.Tensor] = []
         
-        for i, realized_graph, task, answer, log_prob, true_answer in enumerate(zip(realized_graphs, current_batch, raw_answers, log_probs, answers)):
+        for i, (realized_graph, task, answer, log_prob, true_answer) in enumerate(zip(realized_graphs, current_batch, raw_answers, log_probs, answers)):
             predict_answer = gsm_get_predict(answer[0])
             is_solved = float(predict_answer)==float(true_answer)
             total_solved = total_solved + is_solved
@@ -212,7 +224,7 @@ async def main():
                 "completion_tokens": CompletionTokens.instance().value,
             }
             data.append(updated_item)
-            realized_graph.save_result(result_dir, i)
+            realized_graph.save_result(result_dir, str(i))
         with open(result_file, 'w',encoding='utf-8') as file:
             json.dump(data, file, indent=4)
         
@@ -257,6 +269,7 @@ async def main():
         print(f"Cost {Cost.instance().value}")
         print(f"PromptTokens {PromptTokens.instance().value}")
         print(f"CompletionTokens {CompletionTokens.instance().value}")
+        break
     if args.to_graph_dir:
         graph.save_graph(args.to_graph_dir)
 
