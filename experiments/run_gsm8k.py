@@ -145,6 +145,7 @@ async def main():
                     refine_zeta=args.refine_zeta,
                     **kwargs)
     device = next(graph.gcn.parameters()).device
+    print(f"Device: {device}")
     
     if args.optimized_spatial:
         optimizer, trainable_models = get_optimizer(graph, lr=args.lr)

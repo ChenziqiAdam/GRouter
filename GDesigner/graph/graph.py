@@ -4,6 +4,7 @@ from abc import ABC
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Bernoulli
 import asyncio
 import os
@@ -107,13 +108,13 @@ class Graph(ABC):
                 refine_rank: Optional[int] = None,
                 refine_zeta: float = 1e-1,
                 ):
-        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if fixed_spatial_masks is None:
             fixed_spatial_masks = [[1 if i!=j else 0 for j in range(len(agent_names))] for i in range(len(agent_names))]
         if fixed_temporal_masks is None:
             fixed_temporal_masks = [[1 for j in range(len(agent_names))] for i in range(len(agent_names))]
-        fixed_spatial_masks = torch.tensor(fixed_spatial_masks).view(-1)
-        fixed_temporal_masks = torch.tensor(fixed_temporal_masks).view(-1)
+        fixed_spatial_masks = torch.tensor(fixed_spatial_masks, device=self.device).view(-1)
+        fixed_temporal_masks = torch.tensor(fixed_temporal_masks, device=self.device).view(-1)
         assert len(fixed_spatial_masks)==len(agent_names)*len(agent_names),"The fixed_spatial_masks doesn't match the number of agents"
         assert len(fixed_temporal_masks)==len(agent_names)*len(agent_names),"The fixed_temporal_masks doesn't match the number of agents"
         
@@ -144,7 +145,7 @@ class Graph(ABC):
         num_agents = len(self.agent_names)
         if fixed_spatial_masks.numel() != total_nodes * total_nodes:
             spatial_mask_matrix = fixed_spatial_masks.view(num_agents, num_agents)
-            expanded_spatial_mask = torch.ones((total_nodes, total_nodes), dtype=spatial_mask_matrix.dtype)
+            expanded_spatial_mask = torch.ones((total_nodes, total_nodes), dtype=spatial_mask_matrix.dtype, device=self.device)
             expanded_spatial_mask[:num_agents, :num_agents] = spatial_mask_matrix
             expanded_spatial_mask.fill_diagonal_(0)
             fixed_spatial_masks = expanded_spatial_mask.view(-1)
@@ -155,7 +156,7 @@ class Graph(ABC):
 
         if fixed_temporal_masks.numel() != total_nodes * total_nodes:
             temporal_mask_matrix = fixed_temporal_masks.view(num_agents, num_agents)
-            expanded_temporal_mask = torch.ones((total_nodes, total_nodes), dtype=temporal_mask_matrix.dtype)
+            expanded_temporal_mask = torch.ones((total_nodes, total_nodes), dtype=temporal_mask_matrix.dtype, device=self.device)
             expanded_temporal_mask[:num_agents, :num_agents] = temporal_mask_matrix
             fixed_temporal_masks = expanded_temporal_mask.view(-1)
         else:
@@ -178,10 +179,16 @@ class Graph(ABC):
         self.encoder_logvar = nn.Linear(self.hidden_dim, self.latent_dim)
         self.ps_linear = nn.Linear(self.latent_dim*3, 1)
         self.refine = RefineModule(self.num_nodes, rank=refine_rank, zeta=refine_zeta)
+        self.gcn.to(self.device)
+        self.mlp.to(self.device)
+        self.encoder_mu.to(self.device)
+        self.encoder_logvar.to(self.device)
+        self.ps_linear.to(self.device)
+        self.refine.to(self.device)
         self.refine_losses: Dict[str, torch.Tensor] = {
-            "L_anchor": torch.tensor(0.0),
-            "L_sparse": torch.tensor(0.0),
-            "L_total": torch.tensor(0.0),
+            "L_anchor": torch.tensor(0.0, device=self.device),
+            "L_sparse": torch.tensor(0.0, device=self.device),
+            "L_total": torch.tensor(0.0, device=self.device),
         }
 
         self.mu: Optional[torch.Tensor] = None
@@ -193,7 +200,7 @@ class Graph(ABC):
         # self.spatial_edge_probs = torch.full((len(self.potential_spatial_edges),),
         #                                      initial_spatial_probability,
         #                                      dtype=torch.float32)
-        init_spatial_logit = torch.log(torch.tensor(initial_spatial_probability / (1 - initial_spatial_probability))) if optimized_spatial else 10.0
+        init_spatial_logit = torch.log(torch.tensor(initial_spatial_probability / (1 - initial_spatial_probability), device=self.device)) if optimized_spatial else 10.0
         # self.spatial_logits = torch.nn.Parameter(torch.ones(len(self.potential_spatial_edges), requires_grad=optimized_spatial) * init_spatial_logit,
         #                                          requires_grad=optimized_spatial) # trainable edge logits
 
@@ -201,8 +208,8 @@ class Graph(ABC):
         # self.temporal_edge_probs = torch.full((len(self.potential_temporal_edges),),
         #                                       initial_temporal_probability,
         #                                       dtype=torch.float32)
-        init_temporal_logit = torch.log(torch.tensor(initial_temporal_probability / (1 - initial_temporal_probability))) if optimized_temporal else 10.0
-        self.temporal_logits = torch.nn.Parameter(torch.ones(len(self.potential_temporal_edges), requires_grad=optimized_temporal) * init_temporal_logit,
+        init_temporal_logit = torch.log(torch.tensor(initial_temporal_probability / (1 - initial_temporal_probability), device=self.device)) if optimized_temporal else 10.0
+        self.temporal_logits = torch.nn.Parameter(torch.ones(len(self.potential_temporal_edges), requires_grad=optimized_temporal, device=self.device) * init_temporal_logit,
                                                  requires_grad=optimized_temporal) # trainable edge logits
         self.group_conversation_history: List[Dict[str,str]] = []
         if self.optimized_spatial:
@@ -227,7 +234,7 @@ class Graph(ABC):
     def construct_adj_matrix(self):
         role_connect:List[Tuple[str,str]] = self.prompt_set.get_role_connection()
         num_nodes = self.num_nodes
-        role_adj = torch.zeros((num_nodes+1,num_nodes+1))
+        role_adj = torch.zeros((num_nodes+1,num_nodes+1), device=self.device)
         role_2_id: Dict[str, List[int]] = {}
 
         for i, node_id in enumerate(self.nodes):
@@ -267,18 +274,18 @@ class Graph(ABC):
             role = node.role
             profile = self.prompt_set.get_description(role)
             feature_array = get_sentence_embedding(profile)
-            feature_tensor = torch.tensor(np.array(feature_array), dtype=torch.float32)
+            feature_tensor = torch.tensor(np.array(feature_array), dtype=torch.float32, device=self.device)
             if feature_dim is None:
                 feature_dim = feature_tensor.size(0)
             features.append(feature_tensor)
 
         if not features:
-            return torch.empty((0, 0), dtype=torch.float32)
+            return torch.empty((0, 0), dtype=torch.float32, device=self.device)
         features_tensor = torch.stack(features)
         return features_tensor
 
     def construct_new_features(self, query):
-        query_embedding = torch.tensor(np.array(get_sentence_embedding(query)), dtype=torch.float32)
+        query_embedding = torch.tensor(np.array(get_sentence_embedding(query)), dtype=torch.float32, device=self.device)
         # query_features: List[torch.Tensor] = []
 
         # for node_id in self.nodes:
@@ -496,9 +503,9 @@ class Graph(ABC):
 
     def construct_spatial_connection(self, temperature: float = 1.0, threshold: float = None,): # temperature must >= 1.0
         self.clear_spatial_connection()
-        log_probs = [torch.tensor(0.0, requires_grad=self.optimized_spatial)]
+        log_probs = [torch.tensor(0.0, requires_grad=self.optimized_spatial, device=self.device)]
         
-        for potential_connection, edge_logit, edge_mask in zip(self.potential_spatial_edges, self.spatial_logits, self.spatial_masks):
+        for potential_connection, edge_prob, edge_mask in zip(self.potential_spatial_edges, self.spatial_probs, self.spatial_masks):
             out_node:Node = self.find_node(potential_connection[0])
             in_node:Node = self.find_node(potential_connection[1])
             if edge_mask == 0.0:
@@ -508,10 +515,10 @@ class Graph(ABC):
                     out_node.add_successor(in_node,'spatial')
                 continue
             if not self.check_cycle(in_node, {out_node}):
-                edge_prob = torch.sigmoid(edge_logit / temperature)
+                # edge_prob = torch.sigmoid(edge_logit / temperature)
                 if threshold:
-                    edge_prob = torch.tensor(1 if edge_prob > threshold else 0)
-                if torch.rand(1) < edge_prob:
+                    edge_prob = torch.tensor(1 if edge_prob > threshold else 0, device=self.device)
+                if torch.rand(1, device=self.device) < edge_prob:
                     out_node.add_successor(in_node,'spatial')
                     log_probs.append(torch.log(edge_prob))
                 else:
@@ -521,7 +528,7 @@ class Graph(ABC):
 
     def construct_temporal_connection(self, round:int = 0, temperature: float = 1.0, threshold: float = None,):  # temperature must >= 1.0
         self.clear_temporal_connection()
-        log_probs = [torch.tensor(0.0, requires_grad=self.optimized_temporal)]
+        log_probs = [torch.tensor(0.0, requires_grad=self.optimized_temporal, device=self.device)]
         if round == 0:
             return torch.sum(torch.stack(log_probs))  
         for potential_connection, edge_logit, edge_mask in zip(self.potential_temporal_edges, self.temporal_logits, self.temporal_masks):
@@ -536,8 +543,8 @@ class Graph(ABC):
             
             edge_prob = torch.sigmoid(edge_logit / temperature)
             if threshold:
-                edge_prob = torch.tensor(1 if edge_prob > threshold else 0)
-            if torch.rand(1) < edge_prob:
+                edge_prob = torch.tensor(1 if edge_prob > threshold else 0, device=self.device)
+            if torch.rand(1, device=self.device) < edge_prob:
                 out_node.add_successor(in_node,'temporal')
                 log_probs.append(torch.log(edge_prob))
             else:
@@ -649,7 +656,7 @@ class Graph(ABC):
         return mu, logvar
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * logvar)
+        std = F.softplus(logvar)+1e-6
         eps = torch.randn_like(std)
         return mu + eps * std
 
@@ -657,6 +664,20 @@ class Graph(ABC):
     def _offdiag_indices(n: int, device, dtype=torch.bool):
         eye = torch.eye(n, dtype=dtype, device=device)
         return torch.where(~eye)
+
+    @staticmethod
+    def _gumbel_sigmoid(logits, tau=1.0, hard=False):
+        """
+        Gumbel-Sigmoid using Gumbel-Softmax internally.
+        """
+        # 构造两类 logits: [not selected, selected]
+        two_class = torch.stack([torch.zeros_like(logits), logits], dim=-1)
+        
+        # 调用内置稳定实现
+        y = F.gumbel_softmax(two_class, tau=tau, hard=hard, dim=-1)
+        
+        # 返回第二类（对应“1”）
+        return y[..., 1]
 
     def ps(self, latent: torch.Tensor, tau: float) -> torch.Tensor:
         device, dtype = latent.device, latent.dtype
@@ -672,23 +693,16 @@ class Graph(ABC):
         ht = h_task.expand(hi.size(0), h)                 # (m, h)
         x  = torch.cat([hi, hj, ht], dim=-1)              # (m, 3h)
 
-        w = self.ps_linear(x).squeeze(-1)
-
-        g = torch.logit(torch.rand_like(w), eps=1e-6)     # (m,)
-
-        logits_off = (w + g) / tau                       # (m,)
-        logits_off = logits_off.clamp(min=-12, max=12)
-        if not torch.isfinite(logits_off).all():
-            print(f"[NaNGuard] logits_off has NaN/Inf")
+        raw_w = self.ps_linear(x).squeeze(-1)
+        w = 5.0*torch.tanh(raw_w/5.0)
+        edge_probs = self._gumbel_sigmoid(w, tau=tau)
+        if not torch.isfinite(edge_probs).all():
+            print(f"[NaNGuard] edge_probs has NaN/Inf")
         if not torch.isfinite(w).all():
             print(f"[NaNGuard] w has NaN/Inf")
-        if not torch.isfinite(g).all():
-            print(f"[NaNGuard] g has NaN/Inf")
 
-        A = torch.full((n, n), fill_value=-30.0, device=device, dtype=dtype)
-        A[idx_i, idx_j] = logits_off
-
-        P = torch.sigmoid(A)                              # (n, n)
+        P = torch.full((n, n), fill_value=0.0, device=device, dtype=dtype)
+        P[idx_i, idx_j] = edge_probs
         if not torch.isfinite(P).all():
             print(f"[NaNGuard] P has NaN/Inf")
         return P
@@ -708,12 +722,18 @@ class Graph(ABC):
 
     def prepare_probabilities(self, query: str) -> None:
         self.mu, self.logvar = self.encode(query)
+        if not torch.isfinite(self.mu).all():
+            print(f"[NaNGuard] mu has NaN/Inf")
+        if not torch.isfinite(self.logvar).all():
+            print(f"[NaNGuard] logvar has NaN/Inf")
         self.latent_z = self.reparameterize(self.mu, self.logvar)
+        if not torch.isfinite(self.latent_z).all():
+            print(f"[NaNGuard] latent_z has NaN/Inf")
         sketch_adj = self.ps(self.latent_z, self.gumbel_tau)
         self.tilde_S = self.qc(sketch_adj)
         flat_probs = self.tilde_S.reshape(-1)
         if self.optimized_spatial:
-            self.spatial_logits = torch.logit(flat_probs, eps=1e-6)
+            self.spatial_probs = flat_probs
         # if self.optimized_temporal:
         #     self.temporal_edge_probs = flat_probs
     
@@ -729,26 +749,33 @@ class Graph(ABC):
                 return True
         return False
 
-    def update_masks(self, pruning_rate: float) -> torch.Tensor:
-        if self.optimized_spatial:
-            num_edges = (self.spatial_masks > 0).sum()
-            num_masks = (self.spatial_masks == 0).sum()
-            prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1
-            _edge_logits = self.spatial_logits.clone()
-            min_edge_logit = _edge_logits.min()
-            _edge_logits[self.spatial_masks == 0] = min_edge_logit - 1.0
-            sorted_edges_idx = torch.argsort(_edge_logits)
-            prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]
-            self.spatial_masks[prune_idx] = 0
+    # def update_masks(self, pruning_rate: float) -> torch.Tensor:
+    #     if self.optimized_spatial:
+    #         num_edges = (self.spatial_masks > 0).sum()
+    #         num_masks = (self.spatial_masks == 0).sum()
+    #         prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1
+    #         _edge_logits = self.spatial_logits.clone()
+    #         min_edge_logit = _edge_logits.min()
+    #         _edge_logits[self.spatial_masks == 0] = min_edge_logit - 1.0
+    #         sorted_edges_idx = torch.argsort(_edge_logits)
+    #         prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]
+    #         self.spatial_masks[prune_idx] = 0
         
-        if self.optimized_temporal:
-            num_edges = (self.temporal_masks > 0).sum()
-            num_masks = (self.temporal_masks == 0).sum()
-            prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1
-            _edge_logits = self.temporal_logits.clone()
-            min_edge_logit = _edge_logits.min()
-            _edge_logits[self.temporal_masks == 0] = min_edge_logit - 1.0
-            sorted_edges_idx = torch.argsort(_edge_logits)
-            prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]
-            self.temporal_masks[prune_idx] = 0
-        return self.spatial_masks, self.temporal_masks
+    #     if self.optimized_temporal:
+    #         num_edges = (self.temporal_masks > 0).sum()
+    #         num_masks = (self.temporal_masks == 0).sum()
+    #         prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1
+    #         _edge_logits = self.temporal_logits.clone()
+    #         min_edge_logit = _edge_logits.min()
+    #         _edge_logits[self.temporal_masks == 0] = min_edge_logit - 1.0
+    #         sorted_edges_idx = torch.argsort(_edge_logits)
+    #         prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]
+    #         self.temporal_masks[prune_idx] = 0
+    #     return self.spatial_masks, self.temporal_masks
+
+def min_max_norm(tensor:torch.Tensor):
+    min_val = tensor.min()
+    max_val = tensor.max()
+    normalized_0_to_1 = (tensor - min_val) / (max_val - min_val)
+    normalized_minus1_to_1 = normalized_0_to_1 * 2 - 1
+    return normalized_minus1_to_1
