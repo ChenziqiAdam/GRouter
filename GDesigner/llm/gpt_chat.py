@@ -13,12 +13,12 @@ from GDesigner.llm.llm import LLM
 from GDesigner.llm.llm_registry import LLMRegistry
 
 
-OPENAI_API_KEYS = ['']
-BASE_URL = ''
+OPENAI_API_KEYS = ['sk-IlhmAWpQFIfc5a0IF566F7Fe93A04522A255422c68158fD7']
+BASE_URL = 'https://api.shubiaobiao.cn/v1/'
 
 load_dotenv()
-MINE_BASE_URL = os.getenv('BASE_URL')
-MINE_API_KEYS = os.getenv('API_KEY')
+MINE_BASE_URL = "https://api.shubiaobiao.cn/v1/"
+MINE_API_KEYS = "sk-IlhmAWpQFIfc5a0IF566F7Fe93A04522A255422c68158fD7"
 
 
 @retry(wait=wait_random_exponential(max=100), stop=stop_after_attempt(3))
@@ -47,9 +47,11 @@ async def achat(
     client = AsyncOpenAI(base_url = MINE_BASE_URL, api_key = MINE_API_KEYS, max_retries=0)
     chat_completion = await client.chat.completions.create(messages = msg, model = model, temperature=1, seed=123)
     response = chat_completion.choices[0].message.content
+    prompt_tokens = chat_completion.usage.prompt_tokens
+    completion_tokens = chat_completion.usage.completion_tokens
     prompt = "".join([item['content'] for item in msg])
-    cost_count(prompt,response,model)
-    return response
+    price, prompt_len, completion_len = cost_count(prompt,response,model,prompt_tokens,completion_tokens)
+    return response, price, prompt_len, completion_len
 
 @LLMRegistry.register('GPTChat')
 class GPTChat(LLM):

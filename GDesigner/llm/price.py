@@ -9,14 +9,14 @@ def cal_token(model:str, text:str):
     num_tokens = len(encoder.encode(text))
     return num_tokens
 
-def cost_count(prompt, response, model_name):
+def cost_count(prompt, response, model_name, prompt_tokens, completion_tokens):
     branch: str
     prompt_len: int
     completion_len: int
     price: float
 
-    prompt_len = cal_token(model_name, prompt)
-    completion_len = cal_token(model_name, response)
+    prompt_len = prompt_tokens
+    completion_len = completion_tokens
     if "gpt-4" in model_name:
         branch = "gpt-4"
         price = prompt_len * OPENAI_MODEL_INFO[branch][model_name]["input"] /1000 + \
@@ -32,9 +32,8 @@ def cost_count(prompt, response, model_name):
         completion_len = 0
     else:
         branch = "other"
-        price = 0.0
-        prompt_len = 0
-        completion_len = 0
+        price = prompt_len * OPENAI_MODEL_INFO[branch][model_name]["input"] /1000 + \
+                completion_len * OPENAI_MODEL_INFO[branch][model_name]["output"] /1000
 
     Cost.instance().value += price
     PromptTokens.instance().value += prompt_len
@@ -97,15 +96,27 @@ OPENAI_MODEL_INFO ={
         "gpt-4o": {
             "context window": 128000, 
             "training": "Jan 2024", 
-            "input": 0.005, 
-            "output": 0.015
+            "input": 0.0025, 
+            "output": 0.010
         },
         "gpt-4o-mini": {
             "context window": 128000, 
             "training": "Jan 2024", 
             "input": 0.00015, 
             "output": 0.0006
-        },  
+        },
+        "gpt-4.1-nano": {
+            "context window": 128000, 
+            "training": "Jan 2024", 
+            "input": 0.0001, 
+            "output": 0.0004
+        },
+        "gpt-4.1-mini": {
+            "context window": 128000, 
+            "training": "Jan 2024", 
+            "input": 0.0004, 
+            "output": 0.0016
+        },
     },
     "gpt-3.5": {
         "current_recommended": "gpt-3.5-turbo-1106",
@@ -173,6 +184,32 @@ OPENAI_MODEL_INFO ={
             "512×512": 0.018,
             "256×256": 0.016
         }
+    },
+    "other": {
+        "qwen3-32b": {
+            "context window": 128000, 
+            "training": "Jan 2024", 
+            "input": 0.00008, 
+            "output": 0.00024
+        },
+        "deepseek-v3": {
+            "context window": 128000, 
+            "training": "Jan 2024", 
+            "input": 0.00015, 
+            "output": 0.0007
+        },
+        "gpt-5-mini": {
+            "context window": 128000, 
+            "training": "Jan 2024", 
+            "input": 0.00025, 
+            "output": 0.0002
+        },
+        "gpt-5-nano": {
+            "context window": 128000, 
+            "training": "Jan 2024", 
+            "input": 0.00005, 
+            "output": 0.0004
+        },
     }
 }
 

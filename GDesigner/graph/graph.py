@@ -629,6 +629,9 @@ class Graph(ABC):
                             "system": current_node.inputs[-1]["system"],
                             "user": current_node.inputs[-1]["user"], 
                             "outputs": current_node.outputs[-1],
+                            "price": current_node.inputs[-1]["price"],
+                            "prompt_len": current_node.inputs[-1]["prompt_len"],
+                            "completion_len": current_node.inputs[-1]["completion_len"],
                         }
                     )
                 for successor in self.nodes[current_node_id].spatial_successors:
@@ -642,6 +645,18 @@ class Graph(ABC):
             
         self.connect_decision_node()
         await self.decision_node.async_execute(input)
+        if len(self.decision_node.inputs) > 0 and "price" in self.decision_node.inputs[-1]:
+            self.group_conversation_history.append(
+                {
+                    "role": self.decision_node.role, 
+                    "system": self.decision_node.inputs[-1]["system"],
+                    "user": self.decision_node.inputs[-1]["user"], 
+                    "outputs": self.decision_node.outputs,
+                    "price": self.decision_node.inputs[-1]["price"],
+                    "prompt_len": self.decision_node.inputs[-1]["prompt_len"],
+                    "completion_len": self.decision_node.inputs[-1]["completion_len"],
+                }
+            )
         final_answers = self.decision_node.outputs
         if len(final_answers) == 0:
             final_answers.append("No answer of the decision node")
@@ -736,7 +751,12 @@ class Graph(ABC):
             self.spatial_probs = flat_probs
         # if self.optimized_temporal:
         #     self.temporal_edge_probs = flat_probs
-    
+
+    def gvae_encoder(self, query: str):
+        self.mu, self.logvar = self.encode(query)
+        self.latent_z = self.reparameterize(self.mu, self.logvar)
+        return self.latent_z
+
     def update_memory(self):
         for id,node in self.nodes.items():
             node.update_memory()

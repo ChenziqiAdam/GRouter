@@ -61,7 +61,14 @@ class FinalWriteCode(Node):
   
         system_prompt, user_prompt = self._process_inputs(input, spatial_info, temporal_info)
         message = [{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}]
-        response = await self.llm.agen(message)
+        response, price, prompt_len, completion_len = await self.llm.agen(message)
+        self.inputs.append({
+            "system": system_prompt,
+            "user": user_prompt,
+            "price": price,
+            "prompt_len": prompt_len,
+            "completion_len": completion_len,
+        })
         return response
 
 
@@ -101,10 +108,17 @@ class FinalRefer(Node):
   
         system_prompt, user_prompt = self._process_inputs(input, spatial_info, temporal_info)
         message = [{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}]
-        response = await self.llm.agen(message)
+        response, price, prompt_len, completion_len = await self.llm.agen(message)
         print(f"################system prompt:{system_prompt}")
         print(f"################user prompt:{user_prompt}")
         print(f"################response:{response}")
+        self.inputs.append({
+            "system": system_prompt,
+            "user": user_prompt,
+            "price": price,
+            "prompt_len": prompt_len,
+            "completion_len": completion_len,
+        })
         return response
 
 @AgentRegistry.register('FinalDirect')

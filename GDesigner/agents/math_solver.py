@@ -53,7 +53,7 @@ class MathSolver(Node):
         """ The input type of this node is Dict """
         system_prompt, user_prompt = self._process_inputs(input, spatial_info, temporal_info)
         message = [{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}]
-        response = await self.llm.agen(message)
+        response, price, prompt_len, completion_len = await self.llm.agen(message)
         if self.role == "Programming Expert":
             answer = execute_code_get_return(response.lstrip("```python\n").rstrip("\n```"))
             response += f"\nthe answer is {answer}"
@@ -63,5 +63,8 @@ class MathSolver(Node):
         self.inputs.append({
             "system": system_prompt,
             "user": user_prompt,
+            "price": price,
+            "prompt_len": prompt_len,
+            "completion_len": completion_len,
         })
         return response

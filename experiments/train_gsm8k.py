@@ -39,7 +39,7 @@ def load_config(config_path):
     
 def parse_args():
     parser = argparse.ArgumentParser(description="GDesigner Experiments on gsm8k")
-    parser.add_argument("--dataset_json", type=str, default="datasets/gsm8k/gsm8k.jsonl")
+    parser.add_argument("--dataset_json", type=str, default="datasets/gsm8k/gsm8k_train.jsonl")
     parser.add_argument("--result_file", type=str, default=None)
     parser.add_argument("--llm_name", type=str, default="gpt-4o-mini")
     parser.add_argument('--mode', type=str, default='FullConnected',
@@ -75,10 +75,6 @@ def parse_args():
                         help="Directory to save the graph.")
     parser.add_argument('--experiment_name', type=str, default=None,
                         help="Name of the experiment.")
-    parser.add_argument('--dataset_start_index', type=int, default=0,
-                        help="Start index of the dataset.")
-    parser.add_argument('--num_of_data', type=int, default=None,
-                        help="Number of data to run.")
     args = parser.parse_args()
     result_path = GDesigner_ROOT / "result"
     os.makedirs(result_path, exist_ok=True)
@@ -92,7 +88,6 @@ async def main():
     result_file = None
     dataset = JSONLReader.parse_file(args.dataset_json)
     dataset = gsm_data_process(dataset)
-    dataset = dataset[args.dataset_start_index:]
     current_time = Time.instance().value or time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     Time.instance().value = current_time
     executed_batch = None
@@ -151,13 +146,9 @@ async def main():
                     **kwargs)
     device = next(graph.gcn.parameters()).device
     print(f"Device: {device}")
-    args.optimized_spatial = False
-    args.optimized_temporal = False
-    graph.eval()
-    print("Start Eval")
     
-    # if args.optimized_spatial:
-    #     optimizer, trainable_models = get_optimizer(graph, lr=args.lr)
+    if args.optimized_spatial:
+        optimizer, trainable_models = get_optimizer(graph, lr=args.lr)
 
     anchor_weight = args.anchor_weight
     sparse_weight = args.sparse_weight
@@ -167,13 +158,13 @@ async def main():
     for i_batch in range(num_batches):
         if executed_batch:
             if i_batch < executed_batch:
-                # if i_batch+1 == args.num_iterations:
-                #     args.optimized_spatial = False
-                #     args.optimized_temporal = False
-                #     total_solved = 0
-                #     total_executed = 0
-                #     graph.eval()
-                #     print("Start Eval")
+                if i_batch+1 == args.num_iterations:
+                    args.optimized_spatial = False
+                    args.optimized_temporal = False
+                    total_solved = 0
+                    total_executed = 0
+                    graph.eval()
+                    print("Start Eval")
                 continue
         print(f"Batch {i_batch}",80*'-')
         start_ts = time.time()
@@ -250,15 +241,15 @@ async def main():
         L_GDesigner = L_utility + anchor_weight * L_anchor + sparse_weight * L_sparse
         if not torch.isfinite(L_GDesigner):
             print(f"[NaNGuard] L_GDesigner has NaN/Inf")
-        # if args.optimized_spatial or args.optimized_temporal:
-        #     optimizer.zero_grad()
-        #     L_GDesigner.backward()
-        #     for model_name, model in trainable_models.items():
-        #         for name, p in model.named_parameters():
-        #             if p.grad is not None and not torch.isfinite(p.grad).all():
-        #                 print(model_name)
-        #                 print(f"[NaNGuard] {name}.grad has NaN/Inf")
-        #     optimizer.step()
+        if args.optimized_spatial or args.optimized_temporal:
+            optimizer.zero_grad()
+            L_GDesigner.backward()
+            for model_name, model in trainable_models.items():
+                for name, p in model.named_parameters():
+                    if p.grad is not None and not torch.isfinite(p.grad).all():
+                        print(model_name)
+                        print(f"[NaNGuard] {name}.grad has NaN/Inf")
+            optimizer.step()
         
         print(f"Batch time {time.time() - start_ts:.3f}")
         print(f"Accuracy: {accuracy}")
@@ -269,21 +260,22 @@ async def main():
         print("L_sparse:", L_sparse.item())
         print("L_GDesigner:", L_GDesigner.item())
         
-        # if i_batch+1 == args.num_iterations:
-        #     if args.to_graph_dir:
-        #         graph.save_graph(args.to_graph_dir)
-        #     args.optimized_spatial = False
-        #     args.optimized_temporal = False
-        #     total_solved = 0
-        #     total_executed = 0
-        #     graph.eval()
-        #     print("Start Eval")
+        if i_batch+1 == args.num_iterations:
+            if args.to_graph_dir:
+                graph.save_graph(args.to_graph_dir)
+            args.optimized_spatial = False
+            args.optimized_temporal = False
+            total_solved = 0
+            total_executed = 0
+            graph.eval()
+            print("Start Eval")
+            break
             
         print(f"Cost {Cost.instance().value}")
         print(f"PromptTokens {PromptTokens.instance().value}")
         print(f"CompletionTokens {CompletionTokens.instance().value}")
-        if args.num_of_data and total_executed >= args.num_of_data:
-            break
+        # if total_executed >= 100:
+        #     break
 
 def get_kwargs(mode:Union[Literal['DirectAnswer'],Literal['FullConnected'],Literal['Random'],Literal['Chain'],Literal['Debate'],Literal['Layered'],Literal['Star']]
                ,N:int):

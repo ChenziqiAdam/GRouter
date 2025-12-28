@@ -18,6 +18,8 @@ from GDesigner.graph.graph import Graph
 from GDesigner.tools.reader.readers import JSONLReader
 from GDesigner.utils.globals import Time
 from GDesigner.utils.globals import Cost, PromptTokens, CompletionTokens
+from GDesigner.router.train_router import build_model_features
+from GDesigner.gnn.gcn import MLP
 from datasets.gsm8k_dataset import gsm_data_process,gsm_get_predict
 from experiments.utils import get_optimizer
 
@@ -79,6 +81,8 @@ def parse_args():
                         help="Start index of the dataset.")
     parser.add_argument('--num_of_data', type=int, default=None,
                         help="Number of data to run.")
+    parser.add_argument('--router_paths', type=str, default="/Users/chenjunzhi/Desktop/context_efficient_agent/GDesigner/router_models/gpt-4.1-nano_gpt-4o-mini_deepseek-v3_lr_1e-3/checkpoints/epoch_0.pt", help="Path to the router models.")
+    parser.add_argument('--use_checkpoint', action='store_true', help="Use the checkpoint of the router models.")
     args = parser.parse_args()
     result_path = GDesigner_ROOT / "result"
     os.makedirs(result_path, exist_ok=True)
@@ -89,6 +93,37 @@ def parse_args():
 
 async def main():
     args = parse_args()
+    args.optimized_spatial = True
+    args.experiment_name = "gsm8k_router_inference_gpt-4.1-nano_gpt-4o-mini_deepseek-v3"
+    args.use_checkpoint = True
+    args.dataset_start_index = 0
+    # args.num_of_data = 100
+    model_paths = {
+        "gpt-4o-mini": "/Users/chenjunzhi/Desktop/context_efficient_agent/GDesigner/graph_result/train_gsm8k_gpt4o-mini",
+        "deepseek-v3": "/Users/chenjunzhi/Desktop/context_efficient_agent/GDesigner/graph_result/train_gsm8k_deepseek-v3",
+        "gpt-4.1-nano": "/Users/chenjunzhi/Desktop/context_efficient_agent/GDesigner/graph_result/train_gsm8k_gpt4.1-nano",
+    }
+    model_descriptions = {
+        "gpt-4o-mini": "gpt-4o-mini is a small, cost-efficient version of GPT-4o that supports text and image inputs, offers low-latency responses with a large context window, and delivers strong performance on everyday reasoning, coding, and math tasks.",
+        "deepseek-v3": "DeepSeek-V3 is a large Mixture-of-Experts language model with 671 billion total parameters and 37 billion activated per token, combining Multi-head Latent Attention and efficient MoE architecture to provide high-quality reasoning and coding capabilities with fast, cost-effective inference over long contexts.",
+        "gpt-4.1-nano": "gpt-4.1-nano is a compact and cost-efficient model in the GPT-4.1 family, designed for fast text generation and reliable instruction-following, providing solid text understanding and basic reasoning capabilities for everyday language processing tasks at scale.",
+    }
+    model_names = list(model_paths.keys())
+    if args.use_checkpoint:
+        ckpt = torch.load(args.router_paths)
+        router_model = MLP(32, 64, 1)
+        projector = MLP(384, 64, 16)
+        router_model.load_state_dict(ckpt["model_state_dict"])
+        projector.load_state_dict(ckpt["projector_state_dict"])
+    else:
+        router_state = torch.load(os.path.join(args.router_paths, "model.pt"))
+        projector_state = torch.load(os.path.join(args.router_paths, "projector.pt"))
+        router_model = MLP(32, 64, 1)
+        projector = MLP(384, 64, 16)
+        router_model.load_state_dict(router_state)
+        projector.load_state_dict(projector_state)
+    router_model.eval()
+    projector.eval()
     result_file = None
     dataset = JSONLReader.parse_file(args.dataset_json)
     dataset = gsm_data_process(dataset)
@@ -124,36 +159,30 @@ async def main():
     agent_names = [name for name,num in zip(args.agent_names,args.agent_nums) for _ in range(num)]
     decision_method = args.decision_method
     kwargs = get_kwargs(args.mode,len(agent_names))
-    if args.from_graph_dir and executed_batch:
-        graph = Graph.load_graph(
-            graph_dir = args.from_graph_dir,
-            domain="gsm8k",
-            llm_name=args.llm_name,
-            agent_names=agent_names,
-            decision_method=decision_method,
-            optimized_spatial=args.optimized_spatial,
-            optimized_temporal=args.optimized_temporal,
-            gumbel_tau=args.gumbel_tau,
-            refine_rank=args.refine_rank,
-            refine_zeta=args.refine_zeta,
-            **kwargs
-        )
-    else:
-        graph = Graph(domain="gsm8k",
-                    llm_name=args.llm_name,
-                    agent_names=agent_names,
-                    decision_method=decision_method,
-                    optimized_spatial=args.optimized_spatial,
-                    optimized_temporal=args.optimized_temporal,
-                    gumbel_tau=args.gumbel_tau,
-                    refine_rank=args.refine_rank,
-                    refine_zeta=args.refine_zeta,
-                    **kwargs)
-    device = next(graph.gcn.parameters()).device
+    graph_kwargs = dict(
+        domain="gsm8k",
+        agent_names=agent_names,
+        decision_method=decision_method,
+        optimized_spatial=args.optimized_spatial,
+        optimized_temporal=args.optimized_temporal,
+        gumbel_tau=args.gumbel_tau,
+        refine_rank=args.refine_rank,
+        refine_zeta=args.refine_zeta,
+        **kwargs
+    )
+    graphs = []
+    for model in model_paths:
+        graphs.append(Graph.load_graph(model_paths[model], **graph_kwargs))
+    
+    model_features = build_model_features(model_descriptions)
+    model_embeddings = [projector(model_features[i]) for i in range(len(model_features))]
+
+    device = next(graphs[0].gcn.parameters()).device
     print(f"Device: {device}")
     args.optimized_spatial = False
     args.optimized_temporal = False
-    graph.eval()
+    for graph in graphs:
+        graph.eval()
     print("Start Eval")
     
     # if args.optimized_spatial:
@@ -180,6 +209,7 @@ async def main():
         answer_log_probs = []
         answers = []
         realized_graphs: List[Graph] = []
+        router_results = []
         
         current_batch = dataloader(dataset,args.batch_size,i_batch)
         if current_batch is None:
@@ -187,6 +217,14 @@ async def main():
             break
         
         for i_record, record in enumerate(current_batch):
+            with torch.no_grad():
+                hidden_states = [graph.gvae_encoder(record["task"])[0] for graph in graphs]
+                embedding_list = [torch.cat([hidden_states[i], model_embeddings[i]], dim=-1) for i in range(len(hidden_states))]
+                embeddings = torch.stack(embedding_list, dim=0)
+                router_output = router_model(embeddings).squeeze(-1)
+                graph_index = router_output.argmax(dim=-1)
+            graph = graphs[graph_index]
+            router_results.append(model_names[graph_index])
             realized_graph = copy.deepcopy(graph)
             realized_graph.gcn = graph.gcn
             realized_graph.mlp = graph.mlp
@@ -209,7 +247,7 @@ async def main():
         anchor_losses: List[torch.Tensor] = []
         sparse_losses: List[torch.Tensor] = []
         
-        for realized_graph, task, answer, log_prob, true_answer in zip(realized_graphs, current_batch, raw_answers, log_probs, answers):
+        for realized_graph, task, answer, log_prob, true_answer, router_result in zip(realized_graphs, current_batch, raw_answers, log_probs, answers, router_results):
             predict_answer = gsm_get_predict(answer[0])
             is_solved = float(predict_answer)==float(true_answer)
             total_solved = total_solved + is_solved
@@ -228,6 +266,7 @@ async def main():
                 "Step": step,
                 "Response": answer,
                 "Attempt answer": predict_answer,
+                "Router result": router_result,
                 "Solved": is_solved,
                 "Total solved": total_solved,
                 "Total executed": total_executed,
